@@ -65,10 +65,30 @@ class PlotCanvas(FigureCanvas):
         self.ax.clear()
         df = pd.DataFrame(self.parent.data['traceEvents'])
         df['relative_ts'] = df['ts'] - df['ts'].min()
+
+        # Check the last value of relative_ts for unit adjustment
+        max_relative_ts = df['relative_ts'].iloc[-1]
+        if max_relative_ts > 100000:
+            x_unit = 's'
+            df['relative_ts'] = df['relative_ts'] / 1_000_000  # Convert to seconds
+        elif max_relative_ts > 10000:
+            x_unit = 'ms'
+            df['relative_ts'] = df['relative_ts'] / 1000  # Convert to milliseconds
+        else:
+            x_unit = 'μs'
+
+        # Adjust y-axis based on self.parent.y_unit
+        if self.parent.y_unit == 'ms':
+            df['dur'] = df['dur'] / 1000  # Convert to milliseconds
+            y_label = 'Duration (ms)'
+        else:
+            y_label = 'Duration (μs)'
+
         for name, group in df.groupby('name'):
             self.ax.plot(group['relative_ts'], group['dur'], marker='o', linestyle='-', label=name)
-        self.ax.set_xlabel('Relative Time (ms)')
-        self.ax.set_ylabel('Duration (μs)')
+
+        self.ax.set_xlabel(f'Relative Time ({x_unit})')
+        self.ax.set_ylabel(y_label)
         self.ax.set_title('Function Durations Over Time')
         self.ax.legend()
         self.ax.grid(True)
@@ -85,10 +105,13 @@ class MainWindow(QMainWindow):
         self.filepath = filepath
         self.data = load_json(filepath)
 
+        self.y_unit = 'μs'
+        self.x_unit = 's'
+
         df = pd.DataFrame(self.data['traceEvents'])
         df['relative (μs)'] = df['ts'] - df['ts'].min()
         # Specify the desired order of columns
-        new_order = ['cat', 'name', 'dur', 'relative (μs)', 'tid', 'ts']
+        new_order = ['cat', 'name', 'dur', f'relative ({self.y_unit})', 'tid', 'ts']
         # Reorder the columns
         df = df[new_order]
 
@@ -98,13 +121,12 @@ class MainWindow(QMainWindow):
         self.table_model = PandasModel(df.sort_values(by='ts', ascending=True))
         self.table_view.setModel(self.table_model)
 
-        self.plot_canvas = PlotCanvas(self)
-
         self.stats_view = QTableView()
-
         stats_df = self.calculate_stats(pd.DataFrame(self.data['traceEvents']))
         self.stats_model = PandasModel(stats_df)
         self.stats_view.setModel(self.stats_model)
+
+        self.plot_canvas = PlotCanvas(self)
 
         self.show_table_button = QPushButton('Show Table')
         self.show_stats_button = QPushButton('Show Stats')
@@ -178,20 +200,43 @@ class MainWindow(QMainWindow):
             ('Mode', lambda x: self.calculate_mode(x))
         ]).reset_index()
 
-        # Update header to denote microseconds
-        stats_summary.columns = ['Function', 'Count', 'Max (μs)', 'Min (μs)', 'Mean (μs)', 'Median (μs)', 'Mode (μs)']
+        # Calculate the average of all the 'Mean' values
+        overall_mean = stats_summary['Mean'].mean()
 
-        # Align numbers to the right and format them
+        # Determine if the units should be in milliseconds
+        if overall_mean > 850:
+            self.y_unit = 'ms'
+            conversion_factor = 1000
+        else:
+            self.y_unit = 'μs'
+            conversion_factor = 1
+
+        # Update header to denote the correct unit
+        stats_summary.columns = [
+            'Function',
+            'Count',
+            f'Max ({self.y_unit})',
+            f'Min ({self.y_unit})',
+            f'Mean ({self.y_unit})',
+            f'Median ({self.y_unit})',
+            f'Mode ({self.y_unit})'
+        ]
+
+        # Align numbers to the right, format them, and apply unit conversion
         for col in stats_summary.columns[1:]:
             if col == 'Count':
                 stats_summary[col] = stats_summary[col].apply(lambda x: x)
             else:
-                stats_summary[col] = stats_summary[col].apply(lambda x: f"{x:,.2f}" if isinstance(x, (int, float)) else x)
+                if self.y_unit == 'ms':
+                    stats_summary[col] = stats_summary[col].apply(lambda x: f"{x / conversion_factor:,.4f}" if isinstance(x, (int, float)) else x)
+                else:
+                    stats_summary[col] = stats_summary[col].apply(lambda x: f"{x / conversion_factor:,.2f}" if isinstance(x, (int, float)) else x)
 
         # Sort by Count
         stats_summary = stats_summary.sort_values(by='Count', ascending=False)
 
         return stats_summary
+
 
     def calculate_mode(self, series):
         try:
